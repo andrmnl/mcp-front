@@ -166,6 +166,45 @@ func TestMCPClientConfig_UnmarshalJSON(t *testing.T) {
 	assert.False(t, config.UserAuthentication.ValidationRegex.MatchString("test_123"))
 }
 
+func TestMCPClientConfig_UnmarshalJSON_Delimiter(t *testing.T) {
+	t.Run("aggregate with delimiter", func(t *testing.T) {
+		input := `{
+			"type": "aggregate",
+			"transportType": "sse",
+			"servers": ["a"],
+			"delimiter": "--"
+		}`
+		var config MCPClientConfig
+		err := json.Unmarshal([]byte(input), &config)
+		require.NoError(t, err)
+		assert.Equal(t, "--", config.Delimiter)
+	})
+
+	t.Run("aggregate defaults to DefaultAggregateDelimiter", func(t *testing.T) {
+		input := `{
+			"type": "aggregate",
+			"transportType": "sse",
+			"servers": ["a"]
+		}`
+		var config MCPClientConfig
+		err := json.Unmarshal([]byte(input), &config)
+		require.NoError(t, err)
+		assert.Equal(t, DefaultAggregateDelimiter, config.Delimiter)
+	})
+
+	t.Run("direct ignores delimiter", func(t *testing.T) {
+		input := `{
+			"transportType": "stdio",
+			"command": "echo",
+			"delimiter": "_"
+		}`
+		var config MCPClientConfig
+		err := json.Unmarshal([]byte(input), &config)
+		require.NoError(t, err)
+		assert.Equal(t, "", config.Delimiter)
+	})
+}
+
 func TestMCPClientConfig_ApplyUserToken(t *testing.T) {
 	config := &MCPClientConfig{
 		Command: "docker",

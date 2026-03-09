@@ -31,6 +31,7 @@ func (c *MCPClientConfig) UnmarshalJSON(data []byte) error {
 		InlineConfig       json.RawMessage            `json:"inline,omitempty"`
 		Servers            []string                   `json:"servers,omitempty"`
 		Discovery          json.RawMessage            `json:"discovery,omitempty"`
+		Delimiter          string                     `json:"delimiter,omitempty"`
 	}
 
 	var raw rawConfig
@@ -50,8 +51,11 @@ func (c *MCPClientConfig) UnmarshalJSON(data []byte) error {
 	c.UserAuthentication = raw.UserAuthentication
 	c.ServiceAuths = raw.ServiceAuths
 	c.InlineConfig = raw.InlineConfig
-
 	if c.Type == ServerTypeAggregate {
+		c.Delimiter = raw.Delimiter
+		if c.Delimiter == "" {
+			c.Delimiter = DefaultAggregateDelimiter
+		}
 		c.Servers = raw.Servers
 		if c.TransportType == "" {
 			c.TransportType = MCPClientTypeSSE
