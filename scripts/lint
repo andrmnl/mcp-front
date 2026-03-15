@@ -19,6 +19,12 @@ echo "==> Validating configs..."
 ./scripts/lint-configs
 
 echo ""
+echo "==> Checking config-types TypeScript..."
+cd packages/config-types
+npx tsc --noEmit
+cd ../..
+
+echo ""
 echo "==> Checking docs formatting..."
 cd docs-site
 npm run format:check

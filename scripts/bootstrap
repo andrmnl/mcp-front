@@ -11,5 +11,10 @@ cd docs-site
 npm ci
 cd ..
 
+echo "==> Installing config-types dependencies..."
+cd packages/config-types
+npm install
+cd ../..
+
 echo ""
 echo "==> Bootstrap complete!"

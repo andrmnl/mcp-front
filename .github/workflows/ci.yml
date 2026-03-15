@@ -36,8 +36,10 @@ jobs:
       - name: Cache Node modules
         uses: actions/cache@v4
         with:
-          path: docs-site/node_modules
-          key: ${{ runner.os }}-node-${{ hashFiles('docs-site/package-lock.json') }}
+          path: |
+            docs-site/node_modules
+            packages/config-types/node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('docs-site/package-lock.json', 'packages/config-types/package-lock.json') }}
           restore-keys: |
             ${{ runner.os }}-node-
 

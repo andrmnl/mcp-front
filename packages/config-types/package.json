@@ -1,0 +1,21 @@
+{
+  "name": "@stainless-api/mcp-front-config",
+  "version": "0.0.1",
+  "description": "TypeScript types for mcp-front configuration files",
+  "types": "./dist/index.d.ts",
+  "main": "./dist/index.js",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/stainless-api/mcp-front"
+  },
+  "keywords": ["mcp", "model-context-protocol", "config", "types"],
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}
