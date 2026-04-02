@@ -1,6 +1,6 @@
 module github.com/stainless-api/mcp-front
 
-go 1.25.0
+go 1.25
 
 require (
 	cloud.google.com/go/firestore v1.20.0
