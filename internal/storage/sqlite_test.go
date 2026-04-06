@@ -282,7 +282,7 @@ func TestSQLiteStoragePersistence(t *testing.T) {
 func TestSQLiteStorageFileCreated(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "subdir", "test.db")
-	os.MkdirAll(filepath.Dir(dbPath), 0755)
+	require.NoError(t, os.MkdirAll(filepath.Dir(dbPath), 0755))
 	key := []byte("01234567890123456789012345678901")
 	enc, _ := crypto.NewEncryptor(key)
 	s, err := NewSQLiteStorage(context.Background(), dbPath, enc)
