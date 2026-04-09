@@ -34,7 +34,7 @@ func NewSQLiteStorage(ctx context.Context, dbPath string, encryptor crypto.Encry
 		return nil, fmt.Errorf("database path is required")
 	}
 
-	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
+	db, err := sql.Open("sqlite", dbPath+"?_busy_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open SQLite database: %w", err)
 	}
@@ -45,6 +45,22 @@ func NewSQLiteStorage(ctx context.Context, dbPath string, encryptor crypto.Encry
 	}
 
 	db.SetMaxOpenConns(1)
+
+	// Set PRAGMAs explicitly — connection string parameters are not reliably
+	// interpreted by modernc.org/sqlite.
+	var journalMode string
+	if err := db.QueryRowContext(ctx, "PRAGMA journal_mode=WAL").Scan(&journalMode); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to set journal_mode=WAL: %w", err)
+	}
+	if journalMode != "wal" {
+		db.Close()
+		return nil, fmt.Errorf("failed to enable WAL mode, got %q", journalMode)
+	}
+	if _, err := db.ExecContext(ctx, "PRAGMA synchronous=NORMAL"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to set synchronous=NORMAL: %w", err)
+	}
 
 	s := &SQLiteStorage{
 		db:        db,
@@ -64,8 +80,15 @@ func NewSQLiteStorage(ctx context.Context, dbPath string, encryptor crypto.Encry
 	return s, nil
 }
 
+const currentSchemaVersion = 1
+
 func (s *SQLiteStorage) migrate(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS schema_meta (
+			key   TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		);
+
 		CREATE TABLE IF NOT EXISTS clients (
 			id            TEXT PRIMARY KEY,
 			secret        TEXT,
@@ -82,7 +105,7 @@ func (s *SQLiteStorage) migrate(ctx context.Context) error {
 			code           TEXT PRIMARY KEY,
 			client_id      TEXT NOT NULL,
 			redirect_uri   TEXT NOT NULL,
-			identity       BLOB NOT NULL,
+			identity       TEXT NOT NULL,
 			scopes         TEXT NOT NULL,
 			audience       TEXT NOT NULL,
 			pkce_challenge TEXT NOT NULL,
@@ -108,6 +131,14 @@ func (s *SQLiteStorage) migrate(ctx context.Context) error {
 			last_active TEXT NOT NULL
 		);
 	`)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.db.ExecContext(ctx,
+		`INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('version', ?)`,
+		fmt.Sprintf("%d", currentSchemaVersion),
+	)
 	return err
 }
 
@@ -322,13 +353,18 @@ func (s *SQLiteStorage) StoreGrant(ctx context.Context, code string, grant *oaut
 		return fmt.Errorf("failed to encode identity: %w", err)
 	}
 
+	encryptedIdentity, err := s.encryptor.Encrypt(string(identityJSON))
+	if err != nil {
+		return fmt.Errorf("failed to encrypt identity: %w", err)
+	}
+
 	_, err = s.db.ExecContext(ctx,
 		`INSERT OR REPLACE INTO grants (code, client_id, redirect_uri, identity, scopes, audience, pkce_challenge, created_at, expires_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		code,
 		grant.ClientID,
 		grant.RedirectURI,
-		identityJSON,
+		encryptedIdentity,
 		toJSONString(grant.Scopes),
 		toJSONString(grant.Audience),
 		grant.PKCEChallenge,
@@ -343,23 +379,23 @@ func (s *SQLiteStorage) ConsumeGrant(ctx context.Context, code string) (*oauth.G
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	var (
-		clientID      string
-		redirectURI   string
-		identityJSON  []byte
-		scopesJSON    string
-		audienceJSON  string
-		pkceChallenge string
-		createdAtStr  string
-		expiresAtStr  string
+		clientID          string
+		redirectURI       string
+		encryptedIdentity string
+		scopesJSON        string
+		audienceJSON      string
+		pkceChallenge     string
+		createdAtStr      string
+		expiresAtStr      string
 	)
 
 	err = tx.QueryRowContext(ctx,
 		`SELECT client_id, redirect_uri, identity, scopes, audience, pkce_challenge, created_at, expires_at FROM grants WHERE code = ?`,
 		code,
-	).Scan(&clientID, &redirectURI, &identityJSON, &scopesJSON, &audienceJSON, &pkceChallenge, &createdAtStr, &expiresAtStr)
+	).Scan(&clientID, &redirectURI, &encryptedIdentity, &scopesJSON, &audienceJSON, &pkceChallenge, &createdAtStr, &expiresAtStr)
 	if err == sql.ErrNoRows {
 		return nil, ErrGrantNotFound
 	}
@@ -375,8 +411,13 @@ func (s *SQLiteStorage) ConsumeGrant(ctx context.Context, code string) (*oauth.G
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
+	decryptedIdentity, err := s.encryptor.Decrypt(encryptedIdentity)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decrypt identity: %w", err)
+	}
+
 	var identity idp.Identity
-	if err := json.Unmarshal(identityJSON, &identity); err != nil {
+	if err := json.Unmarshal([]byte(decryptedIdentity), &identity); err != nil {
 		return nil, fmt.Errorf("failed to decode identity: %w", err)
 	}
 
@@ -586,6 +627,8 @@ func toJSONString(s []string) string {
 
 func jsonStringSlice(s string) []string {
 	var result []string
-	json.Unmarshal([]byte(s), &result)
+	if err := json.Unmarshal([]byte(s), &result); err != nil {
+		log.LogError("Failed to unmarshal JSON string slice: %v", err)
+	}
 	return result
 }
