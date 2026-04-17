@@ -1,14 +1,18 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"maps"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/stainless-api/mcp-front/internal/config"
 	"github.com/stainless-api/mcp-front/internal/jsonrpc"
@@ -16,6 +20,11 @@ import (
 )
 
 var errNoBackendSessionID = errors.New("backend did not return Mcp-Session-Id header")
+
+// backendSSEKeepAlives holds cancel functions for background SSE connections
+// that keep backend sessions alive (e.g. Playwright MCP kills sessions
+// without an active SSE listener after ~8s due to a hardcoded heartbeat).
+var backendSSEKeepAlives sync.Map // map[string]context.CancelFunc
 
 // forwardStreamablePostToBackend handles POST requests for streamable-http transport
 func forwardStreamablePostToBackend(ctx context.Context, w http.ResponseWriter, r *http.Request, cfg *config.MCPClientConfig) {
@@ -155,6 +164,10 @@ func initBackendSession(ctx context.Context, srcHeaders http.Header, cfg *config
 		"sessionID":  newSessionID,
 	})
 
+	// Start SSE keepalive to prevent session timeout on backends that require
+	// an active listener (e.g. Playwright MCP's hardcoded heartbeat).
+	startSSEKeepAlive(cfg.URL, newSessionID)
+
 	// Step 2: send initialized notification
 	notifyBody := []byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)
 	notifyHeaders := headers.Clone()
@@ -168,4 +181,87 @@ func initBackendSession(ctx context.Context, srcHeaders http.Header, cfg *config
 	resp.Body.Close()
 
 	return newSessionID, nil
+}
+
+// startSSEKeepAlive opens a background GET/SSE connection to the backend and
+// responds to JSON-RPC ping requests to keep the session alive. Playwright MCP
+// sends pings every 3s with a 5s timeout — if unanswered, the session is killed.
+func startSSEKeepAlive(backendURL, sessionID string) {
+	// Cancel any existing keepalive for this backend
+	if cancel, ok := backendSSEKeepAlives.LoadAndDelete(backendURL); ok {
+		cancel.(context.CancelFunc)()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	backendSSEKeepAlives.Store(backendURL, cancel)
+
+	go func() {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, backendURL, nil)
+		if err != nil {
+			return
+		}
+		req.Header.Set("Accept", "text/event-stream")
+		req.Header.Set("Mcp-Session-Id", sessionID)
+
+		resp, err := (&http.Client{}).Do(req)
+		if err != nil {
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return
+		}
+
+		log.LogInfoWithFields("streamable_proxy", "SSE keepalive connected", map[string]any{
+			"backendURL": backendURL,
+			"sessionID":  sessionID,
+		})
+
+		// Read SSE events and respond to pings
+		scanner := bufio.NewScanner(resp.Body)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			data := line[6:]
+			// Check if this is a ping request (contains "method":"ping")
+			if !strings.Contains(data, `"ping"`) {
+				continue
+			}
+			// Extract the request ID to build a proper response
+			// Ping format: {"jsonrpc":"2.0","id":"...","method":"ping"}
+			var msg struct {
+				ID      any    `json:"id"`
+				Method  string `json:"method"`
+			}
+			if err := json.Unmarshal([]byte(data), &msg); err != nil || msg.Method != "ping" {
+				continue
+			}
+			// Respond with empty result
+			pongBody, _ := json.Marshal(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      msg.ID,
+				"result":  map[string]any{},
+			})
+			pongReq, err := http.NewRequestWithContext(ctx, http.MethodPost, backendURL, bytes.NewReader(pongBody))
+			if err != nil {
+				continue
+			}
+			pongReq.Header.Set("Content-Type", "application/json")
+			pongReq.Header.Set("Accept", "application/json, text/event-stream")
+			pongReq.Header.Set("Mcp-Session-Id", sessionID)
+			pongResp, err := (&http.Client{Timeout: 5 * time.Second}).Do(pongReq)
+			if err != nil {
+				continue
+			}
+			io.Copy(io.Discard, pongResp.Body)
+			pongResp.Body.Close()
+		}
+
+		log.LogInfoWithFields("streamable_proxy", "SSE keepalive disconnected", map[string]any{
+			"backendURL": backendURL,
+		})
+	}()
 }
